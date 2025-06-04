@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>WhatsApp Login</title>
+  <style>
+    body { font-family: Arial; display: flex; flex-direction: column; align-items: center; margin-top: 50px; }
+    img { margin-top: 20px; border: 2px solid #000; }
+  </style>
+</head>
+<body>
+  <h2>Scan the QR Code with WhatsApp</h2>
+  <div id="qrArea">Loading QR...</div>
+
+  <script>
+    async function fetchQR() {
+      const res = await fetch('/qr');
+      const data = await res.json();
+      const qrDiv = document.getElementById('qrArea');
+
+      if (data.qr) {
+        qrDiv.innerHTML = `<img src="${data.qr}" alt="QR Code" />`;
+      } else {
+        qrDiv.innerHTML = "Waiting for QR Code...";
+      }
+    }
+
+    fetchQR();
+    setInterval(fetchQR, 5000); // Auto-refresh QR every 5s
+  </script>
+</body>
+</html>
